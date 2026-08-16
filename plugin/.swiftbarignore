@@ -2,50 +2,108 @@
 # 都 chmod +x 并执行，失败的会在菜单栏显示成一个方框问号。
 #
 # 匹配语义（PluginManger.swift v2.1.1 的 shouldBeIgnored）：
-#   先精确比对「文件名」或「相对插件目录的路径」，再把 glob 转正则
-#   （`**/` → `(.*/)?`，`*` → `[^/]*` 不跨斜杠，`?` → `[^/]`），
-#   同样对「文件名」和「相对路径」两者分别匹配。
+# 先精确比对「文件名」或「相对插件目录的路径」，再把 glob 转正则，
+# 同样对文件名和相对路径两者分别匹配。
 #
-# ⚠️ 光写目录名挡不住目录里的文件：递归枚举第一遍已经把子目录里的文件
-#    平铺进候选列表了，而匹配是逐个文件做的。所以每个目录都要再配一条
-#    `目录/**/*`。下面成对出现的条目就是这个原因，别只删一半。
+# ⚠️ 两个反直觉的地方，写规则前务必知道：
 #
-# 点开头的路径（.git/.venv/.pytest_cache…）本来就被跳过，不必列在这里。
-# 另：`#` 开头的行是注释，所以 emacs 自动保存文件（#foo#）没法用规则排除。
+# 1. 只写文件名的 glob（`*.pyc`）匹配的是 lastPathComponent，
+#    所以在任意深度都生效——这是最省事、最可靠的写法，优先用它。
+#
+# 2. `**/` 那条转换是死代码。源码写的是
+#    escapedPattern(for:) 之后再 replacingOccurrences(of: "\*\*/", ...)，
+#    但 Foundation 的 escapedPattern 会把 `/` 转义成 `\/`，
+#    于是待替换的字面量永远匹配不上。实测 `docs/**/*` 编译成
+#    `^docs\/[^/]*[^/]*\/[^/]*$`——要求正好三段路径，连 docs/menubar.png
+#    都匹配不到。所以目录要按深度显式列：`dir/*`、`dir/*/*`。
+#
+# 3. 黑名单不可能覆盖全（SwiftBar 没有白名单，也不支持 ! 取反）。
+#    像 node_modules 这种任意深度的依赖树只能逐层列，列到第三层就到头了。
+#    真正的保障是「这个目录里只放插件」这条纪律 + 测试里的目录卫生断言，
+#    本文件是第二道防线。
+#
+# 点开头的路径（.git/.venv/.pytest_cache…）本来就被跳过，不必列。
+# `#` 开头的行是注释，所以 emacs 的 #autosave# 文件没法用规则排除。
 
-# Python 字节码
-__pycache__
-__pycache__/**/*
+# ── 按文件名排除（任意深度生效，首选写法）──
 *.pyc
 *.pyo
-
-# 编辑器 / 合并 / 日志残留
+*.md
+*.txt
+*.xml
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.svg
+*.html
+*.css
+*.gz
+*.zip
+*.whl
+*.log
 *~
 *.bak
 *.orig
 *.rej
 *.swp
-*.log
+LICENSE
+Makefile
+test_*
 
-# 打包与覆盖率产物
+# ── 按目录排除（须逐层显式列，见上面第 2 点）──
+__pycache__
+__pycache__/*
 build
-build/**/*
+build/*
+build/*/*
 dist
-dist/**/*
+dist/*
+dist/*/*
 htmlcov
-htmlcov/**/*
+htmlcov/*
 *.egg-info
-*.egg-info/**/*
+*.egg-info/*
+docs
+docs/*
+docs/*/*
 
-# 凭据绝不能被执行（本项目的 token 正确位置是 ~/.config/caiyun/token）
+# ── 凭据（文件名规则，任意深度生效）──
 token
 *.token
+id_rsa
+id_ed25519
+id_ecdsa
+credentials
 *.pem
 *.key
+*.p12
+*.pfx
+*.cer
+*.crt
+*.jks
+*.keystore
 
-# 文档与测试若被误放进来，也不要执行
-*.md
-*.txt
-*.xml
-LICENSE
-test_*
+# ── 常见配置 / 数据 / 笔记文件 ──
+Dockerfile
+Makefile
+*.yaml
+*.yml
+*.toml
+*.ini
+*.cfg
+*.csv
+*.tsv
+*.ipynb
+*.in
+requirements*
+
+# ── 依赖树（只能逐层列，深层覆盖不全，见文件开头说明）──
+venv
+venv/*
+venv/*/*
+venv/*/*/*
+node_modules
+node_modules/*
+node_modules/*/*
+node_modules/*/*/*

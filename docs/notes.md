@@ -18,19 +18,35 @@
 
 它用 `FileManager.enumerator(at:)` 递归遍历，子目录里的文件照样算。`MakePluginExecutable` 默认开着，没有执行位的文件会被 `chmod +x`（`Plugin.makeScriptExecutable`）之后执行。文件名里没有合法刷新间隔也照样加载，只是间隔变成一百天——但仍会立即执行一次，足够挂给你看。
 
-三次问号分别是：`__pycache__` 里的 `.pyc`（两次）、以及把插件目录指到仓库根目录时被执行的 `README.md`。SwiftBar 会给每个加载过的插件在 `~/Library/Application Support/SwiftBar/Plugins/` 下建数据目录，这些目录至今还在，是现成的物证。
+三次问号分别是：`__pycache__` 里的 `.pyc`（两次）、以及把插件目录指到仓库根目录时被执行的 `README.md`。SwiftBar 会给每个加载过的插件在 `~/Library/Application Support/SwiftBar/Plugins/` 下建数据目录，这些目录至今还在，是现成的物证。建目录的 `createSupportDirs()` 有三个调用点，全在插件的构造函数里（`ExecutablePlugin.swift:72`、`StreamablePlugin.swift:63`、`PackagedPlugin.swift:100`），而构造函数只对通过筛选的文件执行——所以目录存在就等于「它确实被当插件加载过」。
 
 所以这个仓库有三道防线：脚本单独放 `plugin/`，文档留在仓库根目录；`plugin/.swiftbarignore` 排除构建产物；仓库根目录再放一份一样的兜底——因为 SwiftBar 只读插件目录根部那一份，万一有人把目录指到仓库根，`plugin/` 里那份根本读不到。
 
-### 写排除规则有个反直觉的坑
+### 写排除规则有两个坑，第二个是 SwiftBar 的 bug
 
-**光写目录名挡不住目录里的文件。** 递归枚举第一遍就把子目录里的文件全平铺进候选列表了，而匹配是逐个文件做的——`__pycache__` 这一条只能省掉一次冗余扫描，真正拦住内容的是 `__pycache__/**/*` 和 `*.pyc`。每个目录都得成对写两条。
+**一、光写目录名挡不住目录里的文件。** 递归枚举第一遍就把子目录里的文件全平铺进候选列表了，而匹配是逐个文件做的——`__pycache__` 这一条只能省掉一次冗余扫描，拦不住 `__pycache__/x.pyc`。
 
-匹配语义（`shouldBeIgnored`）：先精确比对文件名或相对插件目录的路径，再把 glob 转成正则（`**/` → `(.*/)?`，`*` → `[^/]*` 不跨斜杠，`?` → `[^/]`），同样对文件名和相对路径两者分别尝试。
+**二、`**/` 那条转换是死代码。** 源码是这么写的：
 
-`#` 开头的行是注释，所以 emacs 的 `#autosave#` 文件没法用规则排除。点开头的路径（`.git`、`.venv`、`.pytest_cache`）本来就被跳过，写进去是死规则。
+```swift
+NSRegularExpression.escapedPattern(for: pattern)
+    .replacingOccurrences(of: "\\*\\*/", with: "(.*/)?")
+```
 
-顺带一提，把名叫 `token` 的明文凭据文件放进插件目录，它会被 `chmod +x` 然后执行——这不只是难看，所以排除规则里专门列了 `token`、`*.token`、`*.pem`、`*.key`。
+但 Foundation 的 `escapedPattern` 会把 `/` 也转义掉，于是字符串里是 `\*\*\/`，而待替换的字面量是 `\*\*/`——永远匹配不上。跑一段 Swift 就能看到：
+
+```
+docs/**/*   →   ^docs\/[^/]*[^/]*\/[^/]*$      要求正好三段路径
+docs/*      →   ^docs\/[^/]*$                  才匹配得到 docs/menubar.png
+```
+
+所以 `dir/**/*` 不是「任意深度」，而是「刚好两层」。目录必须按深度逐条列：`dir/*`、`dir/*/*`。
+
+**最省事的写法是只写文件名的 glob**（`*.pyc`、`*.png`），因为匹配会拿 `lastPathComponent` 试一次，任意深度都生效。
+
+匹配语义完整版：先精确比对文件名或相对插件目录的路径，再把 glob 转正则（`*` → `[^/]*` 不跨斜杠，`?` → `[^/]`），同样对文件名和相对路径两者分别尝试。`#` 开头的行是注释，所以 emacs 的 `#autosave#` 没法用规则排除；点开头的路径本来就被跳过，写进去是死规则。
+
+还有一点值得单说：把名叫 `token` 的明文凭据放进插件目录，它会被 `chmod +x` 然后**执行**。所以排除规则里专门列了 `token`、`id_rsa`、`*.pem`、`*.p12` 这些。但黑名单不可能覆盖全——SwiftBar 没有白名单也不支持 `!` 取反，像 `node_modules` 这种任意深度的树只能逐层列。真正的保障是「插件目录里只放插件」这条纪律，测试里那条 `os.listdir` 断言就是干这个的，不依赖任何对 SwiftBar 语义的建模。
 
 ### 清理完要不要重启
 
@@ -96,7 +112,7 @@ token 不会打印到菜单里：格式非法时只报字符数不回显内容�
 ```bash
 ./plugin/xiayule.5m.py                   # 直接跑，看输出文本
 open -g "swiftbar://refreshallplugins"   # 让 SwiftBar 立即刷新
-python3 test_plugin.py                   # 63 项回归测试，纯 mock
+python3 test_plugin.py                   # 65 项回归测试，纯 mock
 ```
 
 SwiftBar 自己有诊断报告，里面有插件候选清单、加载状态、错误信息，出问题先看它：
@@ -105,4 +121,6 @@ SwiftBar 自己有诊断报告，里面有插件候选清单、加载状态、�
 cat ~/Library/Application\ Support/SwiftBar/Diagnostics/latest-system-report.txt
 ```
 
-测试里有一组插件目录卫生断言，用复刻 SwiftBar 发现逻辑的实现验证插件目录和仓库根目录都只会加载真插件，杂物全部被排除。排除规则要是被改坏了，测试会直接失败，而不是等菜单栏冒出问号才发现。
+测试里有一组插件目录卫生断言。最硬的一条是直接比对 `os.listdir(plugin/)`——不依赖任何对 SwiftBar 语义的建模，塞进去东西就报错。另外几条用复刻的发现逻辑验证插件目录和仓库根目录都只会加载真插件，35 个杂物做穿透测试。
+
+那个复刻实现有个容易写错的地方：Python 的 `re.escape` 不转义 `/`，Foundation 的会。不补上这个差异，模型就比真实 SwiftBar 宽松，测试会在有 bug 的规则上照样变绿——这坑我踩过一次，规则里的 `dir/**/*` 就是这么混过测试上线的。现在模型和一份逐行移植的 Swift oracle 在三棵目录树上逐文件对齐过。

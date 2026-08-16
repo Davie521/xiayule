@@ -441,16 +441,23 @@ print("=" * 62)
 
 
 def glob_to_regex(pattern):
-    """复刻 SwiftBar shouldBeIgnored 的 glob→正则转换（PluginManger.swift v2.1.1）"""
+    """复刻 SwiftBar shouldBeIgnored 的 glob→正则转换（PluginManger.swift v2.1.1）
+
+    关键：Foundation 的 NSRegularExpression.escapedPattern(for:) 会把 `/` 转义成 `\\/`，
+    而 Python 的 re.escape 不会。必须手工补上，否则源码里
+    `replacingOccurrences(of: "\\*\\*/", ...)` 那条替换在这个模型里会生效、
+    在真实 SwiftBar 里却是死代码——模型就会比实际宽松，测试变成自证。
+    实测：`docs/**/*` 在 Swift 里编译成 `^docs\\/[^/]*[^/]*\\/[^/]*$`（要求正好三段路径）。
+    """
     import re
-    p = re.escape(pattern)
-    p = p.replace(r"\*\*/", "(.*/)?").replace(r"\*", "[^/]*").replace(r"\?", "[^/]")
+    p = re.escape(pattern).replace("/", r"\/")
+    p = p.replace(r"\*\*/", "(.*/)?")  # 与 Swift 一致：永不命中，保留以示对齐
+    p = p.replace(r"\*", "[^/]*").replace(r"\?", "[^/]")
     return re.compile(r"^" + p + r"$")
 
 
 def swiftbar_would_load(root):
     """复刻 SwiftBar 的插件发现：递归、跳过隐藏、排除 .json/空文件、应用 .swiftbarignore"""
-    import re
     patterns = []
     ig = os.path.join(root, ".swiftbarignore")
     if os.path.exists(ig):
@@ -473,6 +480,12 @@ def swiftbar_would_load(root):
     return sorted(found)
 
 
+# G0 最硬的一条：插件目录的实际内容。不依赖任何对 SwiftBar 语义的建模，
+#    所以哪怕下面的模型写错了，这条也拦得住「往插件目录里塞东西」。
+expected = {"xiayule.5m.py", ".swiftbarignore"}
+actual = set(os.listdir(PLUGIN_DIR))
+check("G0 插件目录内容严格受限", actual == expected, f"多出/缺少 {actual ^ expected}")
+
 # G1 插件目录里除了脚本本身没有别的可执行候选
 loaded = swiftbar_would_load(PLUGIN_DIR)
 check("G1 插件目录只加载脚本本身", loaded == ["xiayule.5m.py"], f"实际 {loaded}")
@@ -485,11 +498,21 @@ check("G2 指到仓库根目录也安全", loaded_root == ["plugin/xiayule.5m.py
 import tempfile
 with tempfile.TemporaryDirectory() as td:
     import shutil
-    shutil.copy(os.path.join(PLUGIN_DIR, ".swiftbarignore"), os.path.join(td, ".swiftbarignore"))
+    src_ignore = os.path.join(PLUGIN_DIR, ".swiftbarignore")
+    check("G3a 排除规则文件存在", os.path.exists(src_ignore), src_ignore)
+    shutil.copy(src_ignore, os.path.join(td, ".swiftbarignore"))
+    # 这些深度-1 的条目正是「目录名规则挡不住内容」暴露出来的用例，
+    # 也是模型如果不模拟 Foundation 的斜杠转义就会误判为已排除的那批
     strays = ["__pycache__/x.pyc", "__pycache__/NOTAPYC", "__pycache__/stale.5m.sh",
-              "token", "creds.token", "id.pem", "notes.txt", "README.md",
+              "docs/menubar.png", "docs/sub/deep.png",
+              "htmlcov/index.html", "htmlcov/style.css",
+              "dist/xy-1.0.tar.gz", "build/top.sh", "build/a/b.sh", "pkg.egg-info/PKG-INFO",
+              "token", "creds.token", "id_rsa", "id_ed25519", "credentials",
+              "key.p12", "app.cer", "server.pem",
+              "notes.txt", "README.md", "config.yaml", "notes.csv", "data.ipynb",
+              "Dockerfile", "Makefile", "requirements.in",
               "x.py~", "x.py.bak", "x.py.orig", "x.py.rej", "x.py.swp", "run.log",
-              "build/a/b.sh", "dist/x.sh", "htmlcov/i.html", "test_x.py"]
+              "test_x.py", "venv/bin/activate", "node_modules/x/cli.js"]
     for s in strays:
         p = os.path.join(td, s)
         os.makedirs(os.path.dirname(p), exist_ok=True) if os.path.dirname(s) else None

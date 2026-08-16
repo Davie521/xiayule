@@ -51,7 +51,7 @@ killall SwiftBar; open -a SwiftBar
 
 网络抖动、彩云偶发 5xx、免费版的 QPS 限流，都不会让菜单栏变成错误卡片。插件会退避重试，还不行就拿上一次成功的数据顶班，并在下拉菜单顶部标明这是几分钟前的。失败记录留在 `~/.cache/xiayule/errors.log`。
 
-跑测试：`python3 test_plugin.py`，63 项，纯 mock 不打真实 API。
+跑测试：`python3 test_plugin.py`，65 项，纯 mock 不打真实 API。
 
 剩下的细节——SwiftBar 的插件扫描规则、菜单栏那个方框问号到底是什么、彩云 API 的雨强分档、调试命令——都在 [docs/notes.md](docs/notes.md)。
 
