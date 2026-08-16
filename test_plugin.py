@@ -2,19 +2,26 @@
 # -*- coding: utf-8 -*-
 """下雨了么 · 回归测试套件（纯 mock，不碰真实 API / 不污染插件目录）
 
-跑法（务必带 PYTHONPYCACHEPREFIX，否则会在 plugin/ 里生成 __pycache__）：
+    python3 test_plugin.py
 
-    PYTHONPYCACHEPREFIX="${TMPDIR}pycache" python3 test_plugin.py
+本文件用 importlib 把插件当模块加载，默认会在 plugin/ 旁边生成 __pycache__，
+而 SwiftBar 会把插件目录里的文件都执行一遍，于是菜单栏冒出方框问号。
+下面第一行代码就关掉字节码写入，所以不需要靠人记得设环境变量。
 """
-import importlib.util
-import io
-import json
-import os
 import sys
-import time
-import urllib.error
 
-PLUGIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plugin", "xiayule.5m.py")
+sys.dont_write_bytecode = True  # 必须在 import 插件之前，别挪到下面去
+
+import importlib.util  # noqa: E402
+import io  # noqa: E402
+import json  # noqa: E402
+import os  # noqa: E402
+import time  # noqa: E402
+import urllib.error  # noqa: E402
+
+REPO = os.path.dirname(os.path.abspath(__file__))
+PLUGIN_DIR = os.path.join(REPO, "plugin")
+PLUGIN = os.path.join(PLUGIN_DIR, "xiayule.5m.py")
 os.environ["CAIYUN_TOKEN"] = "mocktoken123"
 
 FAILURES = []
@@ -426,6 +433,76 @@ check("F11 pct100 不把 1 变 100", m9.pct100(1) == 1)
 check("F12 spark 干湿", m9.spark([0, 1, 5, 20, 60], 0.5) == "▁▂▄▆█", m9.spark([0, 1, 5, 20, 60], 0.5))
 check("F13 aqi 分级", m9.aqi_grade(42) == "优" and m9.aqi_grade(120) == "轻度污染")
 check("F14 clean 管道符", m9.clean("a|b\nc") == "a｜b c")
+
+print()
+print("=" * 62)
+print("G. 插件目录卫生（防菜单栏问号）")
+print("=" * 62)
+
+
+def glob_to_regex(pattern):
+    """复刻 SwiftBar shouldBeIgnored 的 glob→正则转换（PluginManger.swift v2.1.1）"""
+    import re
+    p = re.escape(pattern)
+    p = p.replace(r"\*\*/", "(.*/)?").replace(r"\*", "[^/]*").replace(r"\?", "[^/]")
+    return re.compile(r"^" + p + r"$")
+
+
+def swiftbar_would_load(root):
+    """复刻 SwiftBar 的插件发现：递归、跳过隐藏、排除 .json/空文件、应用 .swiftbarignore"""
+    import re
+    patterns = []
+    ig = os.path.join(root, ".swiftbarignore")
+    if os.path.exists(ig):
+        patterns = [l.strip() for l in open(ig)
+                    if l.strip() and not l.strip().startswith("#")]
+    found = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        for fn in filenames:
+            if fn.startswith("."):
+                continue
+            full = os.path.join(dirpath, fn)
+            rel = os.path.relpath(full, root)
+            if fn.lower().endswith(".json") or not os.path.isfile(full) or os.path.getsize(full) == 0:
+                continue
+            if any(fn == p or rel == p or glob_to_regex(p).match(fn) or glob_to_regex(p).match(rel)
+                   for p in patterns):
+                continue
+            found.append(rel)
+    return sorted(found)
+
+
+# G1 插件目录里除了脚本本身没有别的可执行候选
+loaded = swiftbar_would_load(PLUGIN_DIR)
+check("G1 插件目录只加载脚本本身", loaded == ["xiayule.5m.py"], f"实际 {loaded}")
+
+# G2 万一 SwiftBar 被指到仓库根目录，也只加载真插件
+loaded_root = swiftbar_would_load(REPO)
+check("G2 指到仓库根目录也安全", loaded_root == ["plugin/xiayule.5m.py"], f"实际 {loaded_root}")
+
+# G3 常见杂物确实会被排除（含凭据文件——被执行是安全问题）
+import tempfile
+with tempfile.TemporaryDirectory() as td:
+    import shutil
+    shutil.copy(os.path.join(PLUGIN_DIR, ".swiftbarignore"), os.path.join(td, ".swiftbarignore"))
+    strays = ["__pycache__/x.pyc", "__pycache__/NOTAPYC", "__pycache__/stale.5m.sh",
+              "token", "creds.token", "id.pem", "notes.txt", "README.md",
+              "x.py~", "x.py.bak", "x.py.orig", "x.py.rej", "x.py.swp", "run.log",
+              "build/a/b.sh", "dist/x.sh", "htmlcov/i.html", "test_x.py"]
+    for s in strays:
+        p = os.path.join(td, s)
+        os.makedirs(os.path.dirname(p), exist_ok=True) if os.path.dirname(s) else None
+        with open(p, "w") as f:
+            f.write("stray\n")
+    with open(os.path.join(td, "real.5m.sh"), "w") as f:
+        f.write("#!/bin/sh\necho hi\n")
+    leaked = swiftbar_would_load(td)
+    check("G3 杂物全部被排除，只剩真插件", leaked == ["real.5m.sh"], f"漏网 {leaked}")
+
+# G4 本测试自身不会在插件目录留下字节码
+check("G4 测试不写字节码", sys.dont_write_bytecode is True)
+check("G5 插件目录无 __pycache__", not os.path.exists(os.path.join(PLUGIN_DIR, "__pycache__")))
 
 print()
 print("=" * 62)

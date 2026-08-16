@@ -157,18 +157,21 @@ GET https://api.caiyunapp.com/v2.6/{token}/{经度},{纬度}/weather
 
 注意它用 `FileManager.enumerator(at:)` **递归**遍历，子目录里的文件照样算；`MakePluginExecutable` 默认开启，没有执行位的文件会被 `chmod +x`（`Plugin.makeScriptExecutable`）后执行。文件名里没有合法刷新间隔也照样加载，只是间隔变成「几乎不刷新」，但**仍会执行一次**——足够挂给你看。
 
-本仓库的两道防线：
+本仓库的三道防线：
 
 1. 脚本单独放 `plugin/` 子目录，README/LICENSE/docs 留在仓库根目录，物理隔离
-2. `plugin/.swiftbarignore` 排除 `__pycache__`、`*.pyc` 等构建产物（实测有效：目录里放个 `.pyc`，SwiftBar 自动重扫后候选列表里没有它）
+2. `plugin/.swiftbarignore` 排除构建产物、编辑器残留、文档，以及**凭据文件**（名叫 `token` 的明文文件被 chmod +x 执行可不只是难看）
+3. 仓库根目录**再放一份** `.swiftbarignore` 兜底——SwiftBar 只读插件目录根部那一份，万一有人把目录指到仓库根，`plugin/` 里那份根本读不到
 
-真混进杂物了：删掉即可。**不用重启 SwiftBar**——非 App Store 版（brew 安装的）有 `DirectoryObserver`，插件目录一变动就会在约 0.5 秒后自动重扫。反倒是菜单里的「Refresh all」不会重新扫描目录（`loadPlugins()` 只在 App Store 版的刷新路径里调用）。
+⚠️ 写排除规则有个反直觉的坑：**光写目录名挡不住目录里的文件**。递归枚举第一遍就把子目录里的文件平铺进候选列表了，而匹配是逐个文件做的——`__pycache__` 这条只能省掉一次冗余扫描，真正拦住内容的是 `__pycache__/**/*` 和 `*.pyc`。所以每个目录都要成对写两条。匹配语义是：先精确比对文件名或相对路径，再把 glob 转正则（`**/`→`(.*/)?`，`*`→`[^/]*` 不跨斜杠），同样对文件名和相对路径两者尝试。另外 `#` 开头的行是注释，没法用规则排除 emacs 的 `#autosave#` 文件。
+
+真混进杂物了：删掉即可，**通常不用重启 SwiftBar**——非 App Store 版（brew 安装的）有 `DirectoryObserver`，插件目录变动约 0.5 秒后自动重扫。但它只是插件目录本身的一个 vnode 监听，**不递归**：改动发生在已存在的子目录内部（比如删掉 `plugin/__pycache__/` 里的某个文件）不会触发，这时问号会赖着不走，得 `killall SwiftBar; open -a SwiftBar`。菜单里的「Refresh all」在非 App Store 版**不会**重扫目录（`loadPlugins()` 只在 App Store 分支的刷新路径里调用）。
 
 **最容易踩的坑：`py_compile` 会偷偷生成 `__pycache__`**
 
-`PYTHONDONTWRITEBYTECODE=1` **管不住** `python3 -m py_compile`（那个环境变量只影响 import 时的隐式字节码写入，不影响显式编译）。`importlib` 把插件当模块 import 来跑测试时同样会在源文件旁生成 `__pycache__`。
+`PYTHONDONTWRITEBYTECODE=1` **管不住** `python3 -m py_compile`（那个环境变量只影响 import 时的隐式字节码写入，不影响显式编译；`-B` 同样管不住）。`importlib` 把插件当模块 import 来跑测试时同样会在源文件旁生成 `__pycache__`。
 
-有了 `.swiftbarignore` 这些都不会再变成问号，但想让源码目录彻底干净，用下面调试小节里的命令。
+现在这两条路都堵上了：`.swiftbarignore` 保证 `.pyc` 不会变成问号，`test_plugin.py` 开头就设了 `sys.dont_write_bytecode = True` 所以压根不生成。想手动做语法检查，用下面调试小节里的命令。
 
 **偶尔出现「取数失败」橙色横幅？**
 
@@ -199,8 +202,9 @@ open -g "swiftbar://refreshallplugins"   # 让 SwiftBar 立即刷新
 # 语法检查：零产物，且报错会指出文件名（别用 py_compile，见上方 FAQ）
 python3 -c "import ast,sys; f=sys.argv[1]; ast.parse(open(f).read(), f)" plugin/xiayule.5m.py
 
-# 要跑 import 插件的测试时，把字节码丢到别处，源码目录保持干净
-export PYTHONPYCACHEPREFIX="${TMPDIR}pycache"
+# 非要用 py_compile 之类会写字节码的工具时，把产物丢到别处
+# （注意 :-/tmp/ 这个兜底：TMPDIR 未设时 "${TMPDIR}pycache" 会变成当前目录下的相对路径）
+export PYTHONPYCACHEPREFIX="${TMPDIR:-/tmp/}pycache"
 ```
 
 出问题时先看 SwiftBar 自己的诊断报告，里面有插件候选清单、加载状态、错误信息：
@@ -209,11 +213,13 @@ export PYTHONPYCACHEPREFIX="${TMPDIR}pycache"
 cat ~/Library/Application\ Support/SwiftBar/Diagnostics/latest-system-report.txt
 ```
 
-**回归测试**（58 项，纯 mock 不打真实 API，覆盖菜单栏状态机、空值免疫、重试/缓存顶班、时间漂移校正、输出格式清洗、纯函数）：
+**回归测试**（63 项，纯 mock 不打真实 API）：
 
 ```bash
-PYTHONPYCACHEPREFIX="${TMPDIR}pycache" python3 test_plugin.py
+python3 test_plugin.py
 ```
+
+覆盖菜单栏状态机、空值免疫、重试/缓存顶班、时间漂移校正、输出格式清洗、纯函数，以及一组**插件目录卫生**断言——用复刻 SwiftBar v2.1.1 发现逻辑的实现，验证插件目录和仓库根目录都只会加载真插件，杂物（含凭据文件）全部被排除。测试本身不写字节码，跑多少遍都不会种出问号。
 
 ## License
 

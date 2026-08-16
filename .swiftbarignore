@@ -1,4 +1,11 @@
-# SwiftBar 会把这个目录下【任意深度】的非隐藏、非 .json、非空文件
+# 兜底：万一把 SwiftBar 的插件目录指到【仓库根目录】而不是 plugin/，
+# SwiftBar 只读插件目录根部的 .swiftbarignore（ignoreFileContent），
+# plugin/ 里那份读不到，所以这里必须再放一份内容相同的。
+# 没有它的话 README.md / LICENSE / test_plugin.py 都会被 chmod +x 并执行——
+# 本项目历史上真发生过（README.md 被当插件跑出了一个问号）。
+# 排除后 plugin/xiayule.5m.py 仍会正常加载，插件照常工作。
+#
+# SwiftBar 会把插件目录下【任意深度】的非隐藏、非 .json、非空文件
 # 都 chmod +x 并执行，失败的会在菜单栏显示成一个方框问号。
 #
 # 匹配语义（PluginManger.swift v2.1.1 的 shouldBeIgnored）：
@@ -43,9 +50,11 @@ token
 *.pem
 *.key
 
-# 文档与测试若被误放进来，也不要执行
+# 文档与测试不要执行（仓库根目录本来就有这些）
 *.md
 *.txt
 *.xml
 LICENSE
 test_*
+docs
+docs/**/*
