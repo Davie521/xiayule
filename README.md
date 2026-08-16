@@ -143,13 +143,34 @@ GET https://api.caiyunapp.com/v2.6/{token}/{经度},{纬度}/weather
 
 **菜单栏出现一个方框问号？**
 
-SwiftBar 每次启动会把插件目录里的**所有文件强制 `chmod +x` 并当插件运行**。README、`__pycache__`、任何杂物放进去都会变成问号。这就是本仓库把脚本单独放在 `plugin/` 子目录的原因 —— 插件目录里只能有插件。
+插件目录里混进了不是插件的文件。SwiftBar 的扫描规则比想象中激进（`PluginManger.swift` 的 `getPluginList()`）：
 
-如果你在 `plugin/` 里留了别的东西：删掉，然后 `killall SwiftBar; open -a SwiftBar`（只刷新插件不够，得重启让它重扫目录）。
+- 用 `FileManager.enumerator(at:)` **递归**遍历，子目录里的文件照样加载
+- 按扩展名只排除 `.json`，其余一律视为插件候选
+- 只跳过隐藏文件（点开头）
+- `MakePluginExecutable` 默认开启，没有执行位的文件会被**自动 `chmod +x`** 后执行
+
+所以 `__pycache__/*.pyc`、README、任何杂物进了这个目录，都会被当插件跑，跑挂了就显示 ❓。这就是本仓库把脚本单独放在 `plugin/` 子目录、文档留在仓库根目录的原因。
+
+清理办法：删掉杂物，然后 `killall SwiftBar; open -a SwiftBar` —— **只刷新插件不够**，必须重启才会重扫目录。
+
+**最容易踩的坑：`py_compile` 会偷偷生成 `__pycache__`**
+
+`PYTHONDONTWRITEBYTECODE=1` **管不住** `python3 -m py_compile`（那个环境变量只影响 import 时的隐式字节码写入，不影响显式编译）。想做语法检查用这个，不产生任何文件：
+
+```bash
+python3 -c "import ast; ast.parse(open('plugin/xiayule.5m.py').read())"
+```
+
+同理，用 `importlib` 把插件当模块 import 来跑测试时也会在源文件旁生成 `__pycache__` —— 测完记得清。
 
 **偶尔出现「取数失败」橙色横幅？**
 
-这是正常的容错提示，不是故障——网络抖动或彩云临时 5xx 时插件会用缓存顶班。看 `~/.cache/xiayule/errors.log` 能查到每次失败的真实状态码。如果频繁出现同一个错误码，再对症处理（429 = 调用太频繁，把文件名改成 `.15m.py`；400 + quota = 额度用完）。
+这是正常的容错提示，不是故障。看 `~/.cache/xiayule/errors.log` 能查到每次失败的真实状态码。
+
+最常见的是 **HTTP 429 `Rate limit exceeded`**：**免费版 QPS = 1**（实测：同一秒内发两个请求，第二个必定 429；间隔 1 秒就正常）。SwiftBar 重启、手动刷新撞上 5 分钟定时、系统唤醒补跑，都可能让两次请求挤在同一秒。插件的退避重试（1 秒那次）正好能清掉这种限流，所以你通常只会看到一闪而过的橙色横幅，数据仍然是好的。
+
+如果日志里频繁出现 **400 + quota**，那是每日额度用完了，把文件名改成 `.15m.py` 降频。
 
 **报错「彩云接口报错 / quota」？**
 
@@ -168,9 +189,10 @@ SwiftBar 每次启动会把插件目录里的**所有文件强制 `chmod +x` 并
 ```bash
 ./plugin/xiayule.5m.py                   # 直接跑，看输出文本
 open -g "swiftbar://refreshallplugins"   # 让 SwiftBar 立即刷新
-```
 
-语法检查记得用 `PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile ...`，否则会在 `plugin/` 里生成 `__pycache__`，然后你就有一个问号了。
+# 语法检查（不产生任何文件，别用 py_compile，见上方 FAQ）
+python3 -c "import ast; ast.parse(open('plugin/xiayule.5m.py').read())"
+```
 
 ## License
 
