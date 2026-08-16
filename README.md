@@ -69,6 +69,8 @@ brew install --cask swiftbar
 git clone https://github.com/Davie521/xiayule.git ~/Desktop/xiayule
 ```
 
+仓库结构：`plugin/` 里只有插件脚本本身和一个 `.swiftbarignore`，README/LICENSE/docs 都在仓库根目录——原因见下方 FAQ。
+
 **3. 把 SwiftBar 的插件目录指向 `plugin/`**
 
 首次启动 SwiftBar 会问你要插件目录，选仓库里的 **`plugin/`** 子目录（不是仓库根目录，原因见下方 FAQ）。或者命令行设：
@@ -141,28 +143,32 @@ GET https://api.caiyunapp.com/v2.6/{token}/{经度},{纬度}/weather
 
 ## FAQ
 
-**菜单栏出现一个方框问号？**
+**菜单栏出现一个方框问号（❓）？**
 
-插件目录里混进了不是插件的文件。SwiftBar 的扫描规则比想象中激进（`PluginManger.swift` 的 `getPluginList()`）：
+那个「问号」其实是 **SwiftBar 的错误图标渲染失败**：插件执行失败时它把菜单栏标题设成 `􀇾`（U+1001FE，SF Symbols 私有区里的 `exclamationmark.triangle.fill`），但菜单栏字体没有这个码位的字形，回落到 `.LastResort` 字体后，私有区统一画成一个方框问号。所以看到 ❓ = **某个「插件」跑挂了**。
 
-- 用 `FileManager.enumerator(at:)` **递归**遍历，子目录里的文件照样加载
-- 按扩展名只排除 `.json`，其余一律视为插件候选
-- 只跳过隐藏文件（点开头）
-- `MakePluginExecutable` 默认开启，没有执行位的文件会被**自动 `chmod +x`** 后执行
+而挂掉的多半不是你的插件，是插件目录里根本不该被当插件的文件。SwiftBar 的扫描规则（`PluginManger.swift` 的 `getPluginList()` / `shouldLoadPluginFile`）比想象中激进——**任意深度**下满足以下条件的文件都会被加载执行：
 
-所以 `__pycache__/*.pyc`、README、任何杂物进了这个目录，都会被当插件跑，跑挂了就显示 ❓。这就是本仓库把脚本单独放在 `plugin/` 子目录、文档留在仓库根目录的原因。
+- 非隐藏（`.skipsHiddenFiles`，点开头的跳过）
+- 非 `.json`（唯一按扩展名排除的类型）
+- 非空文件、是普通文件
+- 未被 `.swiftbarignore` 匹配
+- 目录内候选总数 < 50（超过会弹窗）
 
-清理办法：删掉杂物，然后 `killall SwiftBar; open -a SwiftBar` —— **只刷新插件不够**，必须重启才会重扫目录。
+注意它用 `FileManager.enumerator(at:)` **递归**遍历，子目录里的文件照样算；`MakePluginExecutable` 默认开启，没有执行位的文件会被 `chmod +x`（`Plugin.makeScriptExecutable`）后执行。文件名里没有合法刷新间隔也照样加载，只是间隔变成「几乎不刷新」，但**仍会执行一次**——足够挂给你看。
+
+本仓库的两道防线：
+
+1. 脚本单独放 `plugin/` 子目录，README/LICENSE/docs 留在仓库根目录，物理隔离
+2. `plugin/.swiftbarignore` 排除 `__pycache__`、`*.pyc` 等构建产物（实测有效：目录里放个 `.pyc`，SwiftBar 自动重扫后候选列表里没有它）
+
+真混进杂物了：删掉即可。**不用重启 SwiftBar**——非 App Store 版（brew 安装的）有 `DirectoryObserver`，插件目录一变动就会在约 0.5 秒后自动重扫。反倒是菜单里的「Refresh all」不会重新扫描目录（`loadPlugins()` 只在 App Store 版的刷新路径里调用）。
 
 **最容易踩的坑：`py_compile` 会偷偷生成 `__pycache__`**
 
-`PYTHONDONTWRITEBYTECODE=1` **管不住** `python3 -m py_compile`（那个环境变量只影响 import 时的隐式字节码写入，不影响显式编译）。想做语法检查用这个，不产生任何文件：
+`PYTHONDONTWRITEBYTECODE=1` **管不住** `python3 -m py_compile`（那个环境变量只影响 import 时的隐式字节码写入，不影响显式编译）。`importlib` 把插件当模块 import 来跑测试时同样会在源文件旁生成 `__pycache__`。
 
-```bash
-python3 -c "import ast; ast.parse(open('plugin/xiayule.5m.py').read())"
-```
-
-同理，用 `importlib` 把插件当模块 import 来跑测试时也会在源文件旁生成 `__pycache__` —— 测完记得清。
+有了 `.swiftbarignore` 这些都不会再变成问号，但想让源码目录彻底干净，用下面调试小节里的命令。
 
 **偶尔出现「取数失败」橙色横幅？**
 
@@ -190,8 +196,17 @@ python3 -c "import ast; ast.parse(open('plugin/xiayule.5m.py').read())"
 ./plugin/xiayule.5m.py                   # 直接跑，看输出文本
 open -g "swiftbar://refreshallplugins"   # 让 SwiftBar 立即刷新
 
-# 语法检查（不产生任何文件，别用 py_compile，见上方 FAQ）
-python3 -c "import ast; ast.parse(open('plugin/xiayule.5m.py').read())"
+# 语法检查：零产物，且报错会指出文件名（别用 py_compile，见上方 FAQ）
+python3 -c "import ast,sys; f=sys.argv[1]; ast.parse(open(f).read(), f)" plugin/xiayule.5m.py
+
+# 要跑 import 插件的测试时，把字节码丢到别处，源码目录保持干净
+export PYTHONPYCACHEPREFIX="${TMPDIR}pycache"
+```
+
+出问题时先看 SwiftBar 自己的诊断报告，里面有插件候选清单、加载状态、错误信息：
+
+```bash
+cat ~/Library/Application\ Support/SwiftBar/Diagnostics/latest-system-report.txt
 ```
 
 ## License
