@@ -209,6 +209,12 @@ export PYTHONPYCACHEPREFIX="${TMPDIR}pycache"
 cat ~/Library/Application\ Support/SwiftBar/Diagnostics/latest-system-report.txt
 ```
 
+**回归测试**（58 项，纯 mock 不打真实 API，覆盖菜单栏状态机、空值免疫、重试/缓存顶班、时间漂移校正、输出格式清洗、纯函数）：
+
+```bash
+PYTHONPYCACHEPREFIX="${TMPDIR}pycache" python3 test_plugin.py
+```
+
 ## License
 
 MIT
