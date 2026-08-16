@@ -44,6 +44,8 @@ docs/*      →   ^docs\/[^/]*$                  才匹配得到 docs/menubar.pn
 
 这个 bug 的身世（读上游 git 历史查清的）：`.swiftbarignore` 是 2023-04 加入的（[#358](https://github.com/swiftbar/SwiftBar/issues/358)，v2.0.0 发布），初版只拿模式去整串匹配「URL 字符串式相对路径」——子目录里的精确文件名永远匹配不上，路径带空格还会被百分号编码搅局。于是有了 [#436](https://github.com/swiftbar/SwiftBar/issues/436)「.swiftbarignore not works」（2025-03）。修它的提交 `7626f518`（"Fix #436"，v2.1.0-beta-1 起发布）重写了匹配器：改用真路径、加了文件名与相对路径双臂、`*` 改成不跨斜杠——都是对的，但顺手加的 `**/` 支持从写下那一刻就是死代码。上游 4270 行测试里没有一条测 `.swiftbarignore`，两代 bug 都是这么溜出去的。
 
+修复已提给上游：[swiftbar/SwiftBar#544](https://github.com/swiftbar/SwiftBar/pull/544)，附 20 组表驱动用例（在未修复的代码上会失败）。合并之前，本仓库的排除规则仍按上面的写法来。
+
 **最省事的写法是只写文件名的 glob**（`*.pyc`、`*.png`），因为匹配会拿 `lastPathComponent` 试一次，任意深度都生效。
 
 匹配语义完整版：先精确比对文件名或相对插件目录的路径，再把 glob 转正则（`*` → `[^/]*` 不跨斜杠，`?` → `[^/]`），同样对文件名和相对路径两者分别尝试。`#` 开头的行是注释，所以 emacs 的 `#autosave#` 没法用规则排除；点开头的路径本来就被跳过，写进去是死规则。
@@ -123,6 +125,6 @@ SwiftBar 自己有诊断报告，里面有插件候选清单、加载状态、�
 cat ~/Library/Application\ Support/SwiftBar/Diagnostics/latest-system-report.txt
 ```
 
-测试里有一组插件目录卫生断言。最硬的一条是直接比对 `os.listdir(plugin/)`——不依赖任何对 SwiftBar 语义的建模，塞进去东西就报错。另外几条用复刻的发现逻辑验证插件目录和仓库根目录都只会加载真插件，35 个杂物做穿透测试。
+测试里有一组插件目录卫生断言。最硬的一条是直接比对 `os.listdir(plugin/)`——不依赖任何对 SwiftBar 语义的建模，塞进去东西就报错。另外几条用复刻的发现逻辑验证插件目录和仓库根目录都只会加载真插件，36 个杂物做穿透测试。
 
 那个复刻实现有个容易写错的地方：Python 的 `re.escape` 不转义 `/`，Foundation 的会。不补上这个差异，模型就比真实 SwiftBar 宽松，测试会在有 bug 的规则上照样变绿——这坑我踩过一次，规则里的 `dir/**/*` 就是这么混过测试上线的。现在模型和一份逐行移植的 Swift oracle 在三棵目录树上逐文件对齐过。
