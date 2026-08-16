@@ -1,0 +1,9 @@
+# SwiftBar 会把插件目录里所有文件当插件跑，这些进去就是菜单栏问号
+__pycache__/
+*.pyc
+
+.DS_Store
+
+# token 绝不入库（正确位置是 ~/.config/caiyun/token）
+token
+*.token
