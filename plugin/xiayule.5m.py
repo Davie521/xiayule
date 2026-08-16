@@ -23,6 +23,7 @@
 import json
 import os
 import re
+import time
 import urllib.request
 import urllib.error
 from datetime import datetime, timedelta, timezone
@@ -36,6 +37,11 @@ except ValueError:
 # 备用坐标：青浦城区 121.1241,31.1512  朱家角 121.0540,31.1110  赵巷 121.1830,31.1330
 PLACE = (os.environ.get("VAR_PLACE", "").strip() or "徐泾").replace("|", "｜").replace("\n", " ")
 TOKEN_FILE = os.path.expanduser("~/.config/caiyun/token")
+CACHE_DIR = os.path.expanduser("~/.cache/xiayule")
+CACHE_FILE = os.path.join(CACHE_DIR, "last.json")
+ERR_LOG = os.path.join(CACHE_DIR, "errors.log")
+STALE_OK_SEC = 2 * 3600  # 缓存超过 2 小时就不再顶班，老实报错
+RETRY_DELAYS = (0, 1.0, 3.0)  # 首次立即，失败后退避重试两次
 
 MIN_RAIN = 0.08      # 分钟级有降水阈值 mm/h（彩云官方分档）
 HOURLY_RAIN = 0.0606 # 小时级有降水阈值 mm/h
@@ -164,6 +170,68 @@ def need_token():
     print(":3.circle: 点这里刷新 | refresh=true")
 
 
+def log_error(msg):
+    """把失败记进 ~/.cache/xiayule/errors.log（保留最近 50 条），方便回溯偶发故障"""
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        lines = []
+        if os.path.exists(ERR_LOG):
+            with open(ERR_LOG) as f:
+                lines = f.read().splitlines()[-49:]
+        lines.append(f"{datetime.now():%Y-%m-%d %H:%M:%S}  {msg}")
+        with open(ERR_LOG, "w") as f:
+            f.write("\n".join(lines) + "\n")
+    except OSError:
+        pass
+
+
+def save_cache(data):
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        tmp = CACHE_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"ts": time.time(), "data": data}, f)
+        os.replace(tmp, CACHE_FILE)  # 原子替换，避免读到写一半的文件
+    except OSError:
+        pass
+
+
+def load_cache():
+    """→ (data, 缓存年龄秒) 或 (None, None)"""
+    try:
+        with open(CACHE_FILE) as f:
+            blob = json.load(f)
+        return blob["data"], max(0, time.time() - blob["ts"])
+    except (OSError, ValueError, KeyError):
+        return None, None
+
+
+def fetch(url, token):
+    """→ (data, 错误标题, 错误详情)。429/5xx/网络抖动自动退避重试"""
+    err_title, err_detail = "彩云网络错误", "未知错误"
+    for delay in RETRY_DELAYS:
+        if delay:
+            time.sleep(delay)
+        try:
+            with urllib.request.urlopen(url, timeout=15) as resp:
+                return json.load(resp), None, None
+        except urllib.error.HTTPError as e:
+            try:
+                body = json.load(e).get("error", "")
+            except Exception:
+                body = ""
+            if not isinstance(body, str):
+                body = json.dumps(body, ensure_ascii=False)
+            err_title = "彩云请求失败"
+            err_detail = f"HTTP {e.code}: {body}"
+            if not (e.code == 429 or e.code >= 500):
+                break  # 4xx 是我们自己的问题，重试没意义
+        except Exception as e:
+            err_title = "彩云网络错误"
+            err_detail = f"{type(e).__name__}: {str(e).replace(token, '***')}"
+    return None, err_title, err_detail
+
+
 def fail(title, detail):
     print(f":exclamationmark.triangle.fill: {title}")
     print("---")
@@ -184,28 +252,29 @@ def main():
 
     url = (f"https://api.caiyunapp.com/v2.6/{token}/{LON},{LAT}/weather"
            f"?alert=true&dailysteps=3&hourlysteps=24&unit=metric:v2")
-    try:
-        with urllib.request.urlopen(url, timeout=15) as resp:
-            data = json.load(resp)
-    except urllib.error.HTTPError as e:
-        try:
-            err = json.load(e).get("error", "")
-        except Exception:
-            err = ""
-        fail("彩云请求失败", f"HTTP {e.code}: {err if isinstance(err, str) else json.dumps(err, ensure_ascii=False)}")
-        return
-    except Exception as e:
-        fail("彩云网络错误", f"{type(e).__name__}: {str(e).replace(token, '***')}")
-        return
+    data, err_title, err_detail = fetch(url, token)
 
-    if data.get("status") != "ok":
+    if data is not None and data.get("status") != "ok":  # HTTP 200 但业务层报错
         err = data.get("error") or "未知错误"
         if not isinstance(err, str):
             err = json.dumps(err, ensure_ascii=False)
         hint = "（token 无效或额度用完，去控制台看看） | href=https://platform.caiyunapp.com/" \
             if ("token" in err or "quota" in err) else ""
-        fail("彩云接口报错", f"{err} {hint}")
-        return
+        data, err_title, err_detail = None, "彩云接口报错", f"{err} {hint}"
+
+    # 偶发失败不该让整个菜单栏变成错误卡片：拿最近一次成功的数据顶班，
+    # 并在页脚说明离线原因；缓存太旧或压根没有才报错。
+    stale = None
+    if data is None:
+        log_error(err_detail)
+        cached, age = load_cache()
+        if cached is not None and age is not None and age <= STALE_OK_SEC:
+            data, stale = cached, age
+        else:
+            fail(err_title, err_detail)
+            return
+    else:
+        save_cache(data)
 
     tz = timezone(timedelta(seconds=data.get("tzshift") or 28800))  # 分钟级钟点按位置时区算
     r = data["result"]
@@ -233,6 +302,11 @@ def main():
 
     # ── 降水时间线：分钟级优先，免费版无 minutely 时用小时级 ──
     p2h = minutely.get("precipitation_2h") or []
+    # 逐分钟序列是以数据发布时刻为起点的，用缓存顶班时要把已经过去的分钟丢掉，
+    # 剩下的才对得上「几分钟后」
+    drift = int(max(0, time.time() - (data.get("server_time") or time.time())) // 60)
+    if drift:
+        p2h = p2h[drift:]
     start_min = stop_min = None
     if p2h:
         if wet_now:
@@ -283,8 +357,16 @@ def main():
         title = f":{sky_sf}: {round(temp)}°" if temp is not None else f":{sky_sf}: {PLACE}"
     print(title)
 
-    # ── 下拉：预报关键句置顶 ──
+    # ── 下拉：离线提示（如有）与预报关键句置顶 ──
     print("---")
+    if stale is not None:
+        mins = int(stale // 60)
+        when = "刚刚" if mins < 1 else (f"{mins} 分钟前" if mins < 60 else f"{mins // 60} 小时前")
+        print(f":wifi.slash: 取数失败，下面是{when}的数据 | color=orange")
+        print(f"--{clean(err_title)}：{clean(err_detail)} | size=11")
+        print(f"--查看失败记录 | bash=/usr/bin/open param1=-t param2=\"{ERR_LOG}\" terminal=false")
+        print("--立即重试 | refresh=true")
+        print("---")
     if keypoint:
         print(f"{clean(keypoint)} | size=13")
         print("---")
