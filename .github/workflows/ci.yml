@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# 同一分支上新的推送把旧的跑掉
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    # 全程 ubuntu：这套测试纯 mock，不打真实 API 也不碰任何 macOS 接口
+    # （插件里出现的 /usr/bin/open 只是打印给 SwiftBar 的菜单指令，不执行）。
+    # 没必要花 macOS runner 的分钟数。
+    name: 测试 py${{ matrix.python }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.9 = macOS 自带的 /usr/bin/python3，插件 shebang 写的是 env python3，
+        # 而 SwiftBar 给插件的 PATH 未必包含 homebrew——所以下限必须真跑一遍。
+        # 3.14 = 本机 homebrew 的版本，也就是手动执行时实际用的那个。
+        python: ["3.9", "3.14"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      # 用 ast.parse 而不是 py_compile：后者会在源文件旁生成 __pycache__，
+      # 那个 .pyc 会被 SwiftBar 当插件执行（docs/notes.md 有来龙去脉）。
+      # CI 里产物无所谓，但保持和文档、install.sh 里同一条命令，别出现两套说法。
+      - name: 语法检查（零产物）
+        run: |
+          python3 -c "import ast,sys; f=sys.argv[1]; ast.parse(open(f, encoding='utf-8').read(), f)" \
+            plugin/xiayule.5m.py
+      - name: 回归测试
+        run: python3 test_plugin.py
+      # 测试自己设了 sys.dont_write_bytecode，这里再确认一次它真没留下东西——
+      # 插件目录里多一个 .pyc，菜单栏就会多一个方框问号。
+      - name: 插件目录没被污染
+        run: |
+          test ! -e plugin/__pycache__
+          actual="$(ls -A plugin/ | sort | tr '\n' ' ')"
+          if [ "$actual" != ".swiftbarignore xiayule.5m.py " ]; then
+            echo "plugin/ 内容异常: $actual" >&2
+            exit 1
+          fi
+
+  shell:
+    name: install.sh 静态检查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: 语法
+        run: bash -n install.sh
+      - name: shellcheck
+        run: shellcheck install.sh
