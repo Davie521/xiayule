@@ -48,6 +48,7 @@
 *.rej
 *.swp
 LICENSE
+install.sh
 Makefile
 test_*
 

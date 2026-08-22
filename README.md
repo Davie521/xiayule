@@ -22,12 +22,11 @@ macOS 菜单栏天气插件。不告诉你「今天有雨」，告诉你几点�
 
 ```bash
 brew install --cask swiftbar
-git clone https://github.com/Davie521/xiayule.git ~/Desktop/xiayule
-defaults write com.ameba.SwiftBar PluginDirectory "$HOME/Desktop/xiayule/plugin"
-killall SwiftBar; open -a SwiftBar
+git clone https://github.com/Davie521/xiayule.git
+cd xiayule && ./install.sh
 ```
 
-插件目录必须指到 `plugin/` 子目录，不能是仓库根目录——[原因在这](docs/notes.md#插件目录里只能放插件)。
+`install.sh` 把脚本拷到 `~/Library/Application Support/xiayule/plugin/`，再把 SwiftBar 的插件目录指过去。**跑起来的是那份副本，不是仓库里这份**——所以仓库随便挪、随便改名都不会让菜单栏变空（[为什么这么装](docs/notes.md#跑的是副本不是仓库)）。代价是改完代码要重跑一次 `./install.sh` 才生效。
 
 然后去 [platform.caiyunapp.com](https://platform.caiyunapp.com/) 注册领 token，创建应用时类型选「天气」，免费版够用。点菜单栏那个钥匙图标，按提示把 token 粘进去。
 

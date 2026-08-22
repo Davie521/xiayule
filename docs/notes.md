@@ -2,6 +2,33 @@
 
 写这个插件时踩的坑和查清的机制。都是实测或读源码得来的，源码行号对应 SwiftBar v2.1.1 (build 597)。
 
+## 跑的是副本，不是仓库
+
+SwiftBar 的插件目录是一条**写死在 macOS 偏好里的绝对路径**（`com.ameba.SwiftBar` 的 `PluginDirectory`）。早先它直接指着仓库里的 `plugin/`，于是仓库变成了运行时依赖：2026-08-20 把仓库挪进 `~/Desktop/small_projects/` 之后，那条路径指向的目录已经不存在，一个插件都加载不了，菜单栏上那条天气就没了。
+
+这次失败最难受的地方是它**彻底安静**。插件跑挂了至少还会顶一个方框问号（下面那节），插件目录整个不存在则只是「没有插件可加载」，不报错也不弹窗。把插件目录指到一个不存在的路径再重启，诊断报告是这样（实测）：
+
+```
+Plugin Directory: none                              ← 不回显你填的路径，直接报 none
+Plugin Directory Exists: no
+Loaded Plugins: 0
+Fallback SwiftBar Item Requested Visible: yes
+No plugin candidates discovered.
+```
+
+最后那两行是它为什么难发现：一个插件都没有的时候，SwiftBar 会把**自己的图标**顶上来占住菜单栏那个位置。所以看起来不像「我的东西没了」，像「这软件本来就长这样」。这次隔了几天才发现。
+
+所以现在多了个 `install.sh`：脚本拷进 `~/Library/Application Support/xiayule/plugin/`，SwiftBar 只认这个固定位置，仓库退回纯源码。同一台机器上的 `claude-reset-notifier` 早就是这个形状（编译产物拷进 `Application Support/`，LaunchAgent 指固定位置），同一次移动它毫发无伤，对照得很清楚。
+
+代价是开发时多一步：改完代码要重跑 `./install.sh` 才生效，直接改仓库里那份不会影响正在跑的。想快速看输出不用装，`./plugin/xiayule.5m.py` 直接跑就行。
+
+安装脚本里有两处不显眼但不能省：
+
+- **临时文件必须带点前缀**（`.xiayule.5m.py.new`）。SwiftBar 按扩展名只排除 `.json`，`xiayule.5m.py.new` 这种名字照样是合法候选——拷到一半被 `DirectoryObserver` 撞见，就会被 `chmod +x` 然后执行。
+- **先落 `.swiftbarignore` 再落插件**。反过来的话中间有一小段时间插件已经在跑而排除规则还没到位，目录里万一有杂物就会被当插件执行。
+
+`install.sh` 还会在改指向之前检查 SwiftBar 当前的插件目录里有没有别的插件——SwiftBar 全局只有一个插件目录，改指向等于把原来那些**静默停掉**，所以有别的插件时它会拒绝执行，要 `--force` 才继续。
+
 ## 插件目录里只能放插件
 
 菜单栏上冒出一个方框问号，这个项目里发生过三次。
@@ -114,7 +141,8 @@ token 不会打印到菜单里：格式非法时只报字符数不回显内容�
 ## 调试
 
 ```bash
-./plugin/xiayule.5m.py                   # 直接跑，看输出文本
+./plugin/xiayule.5m.py                   # 直接跑，看输出文本（不影响正在跑的那份）
+./install.sh                             # 把改动装进去才会影响菜单栏
 open -g "swiftbar://refreshallplugins"   # 让 SwiftBar 立即刷新
 python3 test_plugin.py                   # 65 项回归测试，纯 mock
 ```
