@@ -52,6 +52,8 @@
 *.rej
 *.swp
 LICENSE
+# 用精确文件名而不是 *.sh：SwiftBar 插件本身大量是 shell 脚本，
+# *.sh 会把真插件一起挡掉。这个脚本里有 killall SwiftBar，被当插件执行就是自杀重启循环。
 install.sh
 Makefile
 test_*

@@ -54,6 +54,19 @@ cd xiayule && ./install.sh
 
 剩下的细节——SwiftBar 的插件扫描规则、菜单栏那个方框问号到底是什么、彩云 API 的雨强分档、调试命令——都在 [docs/notes.md](docs/notes.md)。
 
+## 卸载
+
+删掉 `~/Library/Application Support/xiayule/`（缓存另在 `~/.cache/xiayule/`，一起删），然后：
+
+```bash
+defaults delete com.ameba.SwiftBar PluginDirectory
+killall SwiftBar; open -a SwiftBar
+```
+
+第二步不能省。`install.sh` 改的是 SwiftBar 的**全局偏好**，只删目录的话它会一直指着一个不存在的路径——而那个状态是静默的：诊断报告写 `Plugin Directory: none`、`Loaded Plugins: 0`，SwiftBar 拿自己的图标顶住菜单栏那个位置，看起来不像出了事。
+
+删掉偏好之后 SwiftBar 再启动会弹一个 **Set SwiftBar Plugins Location**（"Select a folder to store the plugins repository"）。这是正常的——它在问插件放哪。真要卸载就选 `Quit SwiftBar`；还想留着 SwiftBar 跑别的插件，就 `OK` 然后指给它新目录。
+
 ## License
 
 MIT
