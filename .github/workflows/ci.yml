@@ -26,7 +26,7 @@ jobs:
         python: ["3.9", "3.14"]
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
       # 用 ast.parse 而不是 py_compile：后者会在源文件旁生成 __pycache__，
