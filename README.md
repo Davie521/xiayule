@@ -3,7 +3,7 @@
 macOS 菜单栏天气插件。不告诉你「今天有雨」，告诉你几点下、几点停。
 
 <p align="center">
-  <img src="docs/menubar.png" width="200" alt="菜单栏显示「18-22时雨」">
+  <img src="docs/menubar.png" width="331" alt="菜单栏显示「17-19时雨」">
 </p>
 
 没雨的时候它只是个温度。雨快来了亮起雨伞和时段，正在下雨时告诉你还有多久停。抬眼一次就知道要不要带伞。
