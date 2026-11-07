@@ -377,7 +377,7 @@ def fetch(url, token, on_attempt=None):
             if not isinstance(body, str):
                 body = json.dumps(body, ensure_ascii=False)
             err_title = "彩云请求失败"
-            err_detail = f"HTTP {e.code}: {body}"
+            err_detail = f"HTTP {e.code}: {body}".replace(token, "***")
             if "quota" in body:
                 return None, "彩云额度用完", err_detail
             if not (e.code == 429 or e.code >= 500):
@@ -431,7 +431,7 @@ def main():
             err = data.get("error") or "未知错误"
             if not isinstance(err, str):
                 err = json.dumps(err, ensure_ascii=False)
-            data, err_title, err_detail = None, "彩云接口报错", err
+            data, err_title, err_detail = None, "彩云接口报错", err.replace(token, "***")
         if data is None:
             log_error(err_detail)
             state.update(fail_ts=time.time(), err=[err_title, err_detail])
