@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # <xbar.title>下雨了么</xbar.title>
-# <xbar.version>v4.0</xbar.version>
+# <xbar.version>v5.0</xbar.version>
 # <xbar.author>Davie521</xbar.author>
 # <xbar.author.github>Davie521</xbar.author.github>
 # <xbar.desc>菜单栏彩云天气：几点下雨、几点雨停一眼看见。实时 + 下雨时段 + 降水 sparkline + 3日预报，SF Symbols 原生图标</xbar.desc>
@@ -18,11 +18,13 @@
 #   GET https://api.caiyunapp.com/v2.6/{token}/{经度},{纬度}/weather
 #   unit=metric:v2 → 降水强度单位 mm/h；分档见 RAIN_TIERS（官方对照表）
 #   免费版套餐无 minutely / alert 块 → 自动用小时级兜底
+#   省额度：SwiftBar 每 5 分钟跑一次只管显示，要不要联网看 fetch_due()
 # 注册领 key：https://platform.caiyunapp.com/
 
 import json
 import os
 import re
+import subprocess
 import time
 import urllib.request
 import urllib.error
@@ -40,12 +42,24 @@ TOKEN_FILE = os.path.expanduser("~/.config/caiyun/token")
 CACHE_DIR = os.path.expanduser("~/.cache/xiayule")
 CACHE_FILE = os.path.join(CACHE_DIR, "last.json")
 ERR_LOG = os.path.join(CACHE_DIR, "errors.log")
-STALE_OK_SEC = 2 * 3600  # 缓存超过 2 小时就不再顶班，老实报错
+STATE_FILE = os.path.join(CACHE_DIR, "state.json")  # 调用计数、上次失败
+FORCE_FILE = os.path.join(CACHE_DIR, "force")       # 菜单里点「刷新」时建，下一轮必联网
+STALE_OK_SEC = 24 * 3600  # 一次调用拿 48 小时预报，缓存超过 24 小时才不再顶班
 RETRY_DELAYS = (0, 1.0, 3.0)  # 首次立即，失败后退避重试两次
 
 MIN_RAIN = 0.08      # 分钟级有降水阈值 mm/h（彩云官方分档）
 HOURLY_RAIN = 0.0606 # 小时级有降水阈值 mm/h
 SOON_HOURS = 3       # 小时级预报几小时内有雨时，菜单栏也亮伞
+
+# 免费的 1 万次是一次性的，按量包也是 ¥25/万次一年有效，所以调用要省着用：
+# 人不在电脑前不调；调用间隔看预报，把额度花在快下雨的时候
+IDLE_LIMIT_SEC = 5 * 60      # 这么久没动键盘鼠标就算没在用
+INTERVAL_CLEAR = 6 * 3600    # 未来 24 小时都没雨
+INTERVAL_LATER = 2 * 3600    # 24 小时内有雨，但在 3 小时以后
+INTERVAL_NEAR = 30 * 60      # 3 小时内有雨，或正在下
+FAIL_BACKOFF_SEC = 30 * 60   # 失败后隔这么久才再试
+YEAR_CAP = 5000              # 每台机器 365 天的上限，两台合计不超 1 万
+YEAR_SEC = 365 * 86400
 
 # 降水强度分档（唯一出处）：(下限 mm/h, 雨(SF图标,名), 雪(SF图标,名))
 RAIN_TIERS = [
@@ -206,12 +220,133 @@ def load_cache():
         return None, None
 
 
-def fetch(url, token):
-    """→ (data, 错误标题, 错误详情)。429/5xx/网络抖动自动退避重试"""
+def load_state():
+    """→ {start, count, fail_ts, err}。文件坏了就当没有，不让它挡住菜单栏"""
+    state = {"start": time.time(), "count": 0, "fail_ts": 0, "err": None}
+    try:
+        with open(STATE_FILE) as f:
+            state.update(json.load(f))
+    except (OSError, ValueError):
+        pass
+    if time.time() - state["start"] >= YEAR_SEC:
+        state.update(start=time.time(), count=0)
+    return state
+
+
+def save_state(state):
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        tmp = STATE_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(state, f)
+        os.replace(tmp, STATE_FILE)
+    except OSError:
+        pass
+
+
+def idle_seconds():
+    """键盘鼠标空闲秒数；读不到返回 None"""
+    try:
+        out = subprocess.run(["/usr/sbin/ioreg", "-c", "IOHIDSystem"], capture_output=True,
+                             text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = re.search(r'"HIDIdleTime" = (\d+)', out)
+    return int(m.group(1)) / 1e9 if m else None
+
+
+def user_active():
+    idle = idle_seconds()
+    return idle is None or idle < IDLE_LIMIT_SEC  # 读不到时按在用算，上限兜底
+
+
+def take_force():
+    """菜单里点过「刷新」→ True，并清掉标记"""
+    try:
+        os.remove(FORCE_FILE)
+        return True
+    except OSError:
+        return False
+
+
+def refresh_action():
+    """菜单「刷新」项的参数：先留标记，这一轮才会真的联网"""
+    return f'bash=/usr/bin/touch param1="{FORCE_FILE}" terminal=false refresh=true'
+
+
+def rebase(data, ts):
+    """把缓存对齐到现在：丢掉已过去的小时和天，实况超过 1 小时就换成当前小时的预报。
+    → 对齐后的副本；预报已经用完时 None"""
+    data = json.loads(json.dumps(data))
+    r = data["result"]
+    born = data.get("server_time") or ts
+    now = time.time()
+    shift = data.get("tzshift") or 28800
+    hourly = r.get("hourly") or {}
+    k = max(0, int(now // 3600) - int(born // 3600))
+    series = {key: v for key, v in hourly.items() if isinstance(v, list)}
+    if k and series and all(len(v) <= k for v in series.values()):
+        return None
+    for key, v in series.items():
+        hourly[key] = v[k:k + 24]
+    days = max(0, int((now + shift) // 86400) - int((born + shift) // 86400))
+    if days:
+        daily = r.get("daily") or {}
+        for key, v in daily.items():
+            if isinstance(v, list):
+                daily[key] = v[days:]
+    if now - born >= 3600:
+        def first(key):
+            v = hourly.get(key) or []
+            return v[0].get("value") if v else None
+        old = r.get("realtime") or {}
+        wind = (hourly.get("wind") or [{}])[0]
+        r["realtime"] = {
+            "temperature": first("temperature"), "apparent_temperature": first("apparent_temperature"),
+            "humidity": first("humidity"), "skycon": first("skycon") or "",
+            "wind": {"speed": wind.get("speed"), "direction": wind.get("direction")},
+            "precipitation": {"local": {"intensity": first("precipitation") or 0}},
+            "air_quality": old.get("air_quality") or {},
+        }
+        r["forecast_keypoint"] = ""
+    return data
+
+
+def fetch_interval(data):
+    """按预报决定多久调一次。data 要先 rebase"""
+    r = data["result"]
+    rt = r.get("realtime") or {}
+    vals = [(h.get("value") or 0) for h in (r.get("hourly") or {}).get("precipitation") or []]
+    local = ((rt.get("precipitation") or {}).get("local") or {}).get("intensity", 0) or 0
+    sky = rt.get("skycon", "")
+    if local >= MIN_RAIN or "RAIN" in sky or "SNOW" in sky or any(v >= HOURLY_RAIN for v in vals[:SOON_HOURS + 1]):
+        return INTERVAL_NEAR
+    if any(v >= HOURLY_RAIN for v in vals):
+        return INTERVAL_LATER
+    return INTERVAL_CLEAR
+
+
+def fetch_due(view, age, state, forced):
+    """这一轮要不要联网。view 是 rebase 后的缓存，没有就是 None"""
+    if state["count"] >= YEAR_CAP:
+        return False
+    if forced:
+        return True
+    if time.time() - state["fail_ts"] < FAIL_BACKOFF_SEC:
+        return False
+    if not user_active():
+        return False
+    return view is None or age >= fetch_interval(view)
+
+
+def fetch(url, token, on_attempt=None):
+    """→ (data, 错误标题, 错误详情)。429/5xx/网络抖动自动退避重试；额度用完不重试"""
     err_title, err_detail = "彩云网络错误", "未知错误"
     for delay in RETRY_DELAYS:
         if delay:
             time.sleep(delay)
+        if on_attempt:
+            on_attempt()
         try:
             with urllib.request.urlopen(url, timeout=15) as resp:
                 return json.load(resp), None, None
@@ -224,6 +359,8 @@ def fetch(url, token):
                 body = json.dumps(body, ensure_ascii=False)
             err_title = "彩云请求失败"
             err_detail = f"HTTP {e.code}: {body}"
+            if "quota" in body:
+                return None, "彩云额度用完", err_detail
             if not (e.code == 429 or e.code >= 500):
                 break  # 4xx 是我们自己的问题，重试没意义
         except Exception as e:
@@ -236,7 +373,9 @@ def fail(title, detail):
     print(f":exclamationmark.triangle.fill: {title}")
     print("---")
     print(clean(detail))
-    print(":arrow.clockwise: 刷新 | refresh=true")
+    if "quota" in detail:
+        print(":cart.fill: 去控制台买额度 | href=https://platform.caiyunapp.com/")
+    print(f":arrow.clockwise: 刷新 | {refresh_action()}")
 
 
 def main():
@@ -250,31 +389,51 @@ def main():
                               f"重新粘贴到 {TOKEN_FILE}")
         return
 
-    url = (f"https://api.caiyunapp.com/v2.6/{token}/{LON},{LAT}/weather"
-           f"?alert=true&dailysteps=3&hourlysteps=24&unit=metric:v2")
-    data, err_title, err_detail = fetch(url, token)
+    state = load_state()
+    cached, age = load_cache()
+    view = None
+    if cached is not None:
+        try:
+            view = rebase(cached, time.time() - age)
+        except (KeyError, TypeError, ValueError):
+            view = None
 
-    if data is not None and data.get("status") != "ok":  # HTTP 200 但业务层报错
-        err = data.get("error") or "未知错误"
-        if not isinstance(err, str):
-            err = json.dumps(err, ensure_ascii=False)
-        hint = "（token 无效或额度用完，去控制台看看） | href=https://platform.caiyunapp.com/" \
-            if ("token" in err or "quota" in err) else ""
-        data, err_title, err_detail = None, "彩云接口报错", f"{err} {hint}"
+    if fetch_due(view, age, state, take_force()):
+        def count():
+            state["count"] += 1
+        url = (f"https://api.caiyunapp.com/v2.6/{token}/{LON},{LAT}/weather"
+               f"?alert=true&dailysteps=3&hourlysteps=48&unit=metric:v2")
+        data, err_title, err_detail = fetch(url, token, count)
+        if data is not None and data.get("status") != "ok":  # HTTP 200 但业务层报错
+            err = data.get("error") or "未知错误"
+            if not isinstance(err, str):
+                err = json.dumps(err, ensure_ascii=False)
+            data, err_title, err_detail = None, "彩云接口报错", err
+        if data is None:
+            log_error(err_detail)
+            state.update(fail_ts=time.time(), err=[err_title, err_detail])
+        else:
+            save_cache(data)
+            view, age = data, 0
+            state.update(fail_ts=0, err=None)
+    save_state(state)
 
     # 偶发失败不该让整个菜单栏变成错误卡片：拿最近一次成功的数据顶班，
     # 并在页脚说明离线原因；缓存太旧或压根没有才报错。
-    stale = None
-    if data is None:
-        log_error(err_detail)
-        cached, age = load_cache()
-        if cached is not None and age is not None and age <= STALE_OK_SEC:
-            data, stale = cached, age
-        else:
-            fail(err_title, err_detail)
-            return
-    else:
-        save_cache(data)
+    failing = state["err"] if state["fail_ts"] else None
+    fresh_enough = view is not None and age <= STALE_OK_SEC
+    if failing and not fresh_enough:
+        fail(*failing)
+        return
+    if view is None:
+        print(":clock.fill: 待更新")
+        print("---")
+        print("用电脑时会自动更新")
+        print(f":arrow.clockwise: 刷新 | {refresh_action()}")
+        return
+    data = view
+    stale = age if failing else None
+    err_title, err_detail = failing or (None, None)
 
     tz = timezone(timedelta(seconds=data.get("tzshift") or 28800))  # 分钟级钟点按位置时区算
     r = data["result"]
@@ -365,7 +524,9 @@ def main():
         print(f":wifi.slash: 取数失败，下面是{when}的数据 | color=orange")
         print(f"--{clean(err_title)}：{clean(err_detail)} | size=11")
         print(f"--查看失败记录 | bash=/usr/bin/open param1=-t param2=\"{ERR_LOG}\" terminal=false")
-        print("--立即重试 | refresh=true")
+        print(f"--立即重试 | {refresh_action()}")
+        if "quota" in err_detail:
+            print("--去控制台买额度 | href=https://platform.caiyunapp.com/")
         print("---")
     if keypoint:
         print(f"{clean(keypoint)} | size=13")
@@ -484,9 +645,11 @@ def main():
     # ── 操作区 ──
     print("---")
     print(":map.fill: 打开彩云雷达图 | href=https://caiyunapp.com/map/")
-    print(":arrow.clockwise: 刷新 | refresh=true")
+    print(f":arrow.clockwise: 刷新 | {refresh_action()}")
     note = " · 时段为小时级精度（分钟级未开通）" if not minutely else ""
-    print(f"更新于 {datetime.now().strftime('%H:%M')}{note} | size=11 color=gray")
+    born = datetime.fromtimestamp(time.time() - age)
+    print(f"更新于 {born.strftime('%H:%M')}{note} | size=11 color=gray")
+    print(f"本机已用 {state['count']}/{YEAR_CAP} 次 | size=11 color=gray")
 
 
 if __name__ == "__main__":
