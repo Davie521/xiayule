@@ -718,6 +718,16 @@ blob.pop("loc")
 json.dump(blob, open(H_CACHE, "w"))
 check("H54 旧格式缓存照常读", m6.load_cache()[0] is not None)
 
+# 接口报错里带 token：日志、状态文件、菜单都不能出现
+tok = "mocktoken123"
+for name, setup in (("HTTP 错误", lambda: raise_http(m6, 403, json.dumps({"error": f"bad /v2.6/{tok}/x"}).encode())),
+                    ("业务错误", lambda: serve(m6, {"status": "failed", "error": f"bad /v2.6/{tok}/x"}))):
+    os.remove(H_STATE) if os.path.exists(H_STATE) else None
+    setup()
+    open(m6.FORCE_FILE, "w").close()
+    out = run(m6)
+    check(f"H55 {name}不泄露 token", tok not in "\n".join(out) + open(H_STATE).read() + open(m6.ERR_LOG).read())
+
 # 坏状态文件不挡菜单栏
 open(H_STATE, "w").write("{bad")
 serve(m6, base())

@@ -31,7 +31,7 @@ No plugin candidates discovered.
 
 **重装很便宜。** 指向没变时（也就是绝大多数「改完代码装一下」）它不重启 SwiftBar，只替换文件再推一次 `swiftbar://refreshallplugins`——插件目录根部的文件被替换会触发 `DirectoryObserver` 自动重扫。只有真要改 `PluginDirectory` 才走 kill + 写偏好 + 重开那条路。
 
-**这个脚本没有自动化测试。** CI 只做 `bash -n` 和 `shellcheck`，都是静态的；65 项回归测试一条都不覆盖它。两条分支是手动验的：把插件目录指到一个不存在的路径再跑 `./install.sh` 恢复，走的是「改指向」分支（诊断报告从 `Loaded Plugins: 0` 回到 `1`）；紧接着再跑一次，SwiftBar 的 PID 没变，走的是「不重启」分支。改这个脚本时别指望 CI 兜底，照着这两步手验一遍。
+**这个脚本没有自动化测试。** CI 只做 `bash -n` 和 `shellcheck`，都是静态的；122 项回归测试一条都不覆盖它。两条分支是手动验的：把插件目录指到一个不存在的路径再跑 `./install.sh` 恢复，走的是「改指向」分支（诊断报告从 `Loaded Plugins: 0` 回到 `1`）；紧接着再跑一次，SwiftBar 的 PID 没变，走的是「不重启」分支。改这个脚本时别指望 CI 兜底，照着这两步手验一遍。
 
 ## 菜单栏上没有它，不一定是它没跑
 
@@ -149,7 +149,7 @@ export PYTHONPYCACHEPREFIX="${TMPDIR:-/tmp/}pycache"
 
 ```
 GET https://api.caiyunapp.com/v2.6/{token}/{经度},{纬度}/weather
-    ?alert=true&dailysteps=3&hourlysteps=24&unit=metric:v2
+    ?alert=true&dailysteps=3&hourlysteps=48&unit=metric:v2
 ```
 
 `unit=metric:v2` 让所有降水强度以 mm/h 返回，然后按官方分档表判定雨档：分钟级 ≥0.08 小雨、≥3.44 中雨、≥11.33 大雨、≥51.30 暴雨；小时级 ≥0.0606 算有雨。
@@ -168,7 +168,7 @@ token 不会打印到菜单里：格式非法时只报字符数不回显内容�
 ./plugin/xiayule.5m.py                   # 直接跑，看输出文本（不影响正在跑的那份）
 ./install.sh                             # 把改动装进去才会影响菜单栏
 open -g "swiftbar://refreshallplugins"   # 让 SwiftBar 立即刷新
-python3 test_plugin.py                   # 65 项回归测试，纯 mock
+python3 test_plugin.py                   # 122 项回归测试，纯 mock
 ```
 
 SwiftBar 自己有诊断报告，里面有插件候选清单、加载状态、错误信息，出问题先看它：
