@@ -21,6 +21,7 @@
 #   省额度：SwiftBar 每 5 分钟跑一次只管显示，要不要联网看 fetch_due()
 # 注册领 key：https://platform.caiyunapp.com/
 
+import fcntl
 import json
 import os
 import re
@@ -44,6 +45,7 @@ CACHE_FILE = os.path.join(CACHE_DIR, "last.json")
 ERR_LOG = os.path.join(CACHE_DIR, "errors.log")
 STATE_FILE = os.path.join(CACHE_DIR, "state.json")  # 调用计数、上次失败
 FORCE_FILE = os.path.join(CACHE_DIR, "force")       # 菜单里点「刷新」时建，下一轮必联网
+LOCK_FILE = os.path.join(CACHE_DIR, "lock")         # 同一时间只有一轮能联网和记次数
 STALE_OK_SEC = 24 * 3600  # 一次调用拿 48 小时预报，缓存超过 24 小时才不再顶班
 RETRY_DELAYS = (0, 1.0, 3.0)  # 首次立即，失败后退避重试两次
 
@@ -204,7 +206,7 @@ def save_cache(data):
         os.makedirs(CACHE_DIR, exist_ok=True)
         tmp = CACHE_FILE + ".tmp"
         with open(tmp, "w") as f:
-            json.dump({"ts": time.time(), "data": data}, f)
+            json.dump({"ts": time.time(), "loc": [LON, LAT], "data": data}, f)
         os.replace(tmp, CACHE_FILE)  # 原子替换，避免读到写一半的文件
     except OSError:
         pass
@@ -215,9 +217,22 @@ def load_cache():
     try:
         with open(CACHE_FILE) as f:
             blob = json.load(f)
+        if blob.get("loc", [LON, LAT]) != [LON, LAT]:  # 改过位置，旧地点的天气不能用
+            return None, None
         return blob["data"], max(0, time.time() - blob["ts"])
     except (OSError, ValueError, KeyError):
         return None, None
+
+
+def take_lock():
+    """→ 文件句柄（进程退出时自动放开）；别的轮次正在跑时 None"""
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        f = open(LOCK_FILE, "w")
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return f
+    except OSError:
+        return None
 
 
 def load_state():
@@ -317,6 +332,10 @@ def fetch_interval(data):
     r = data["result"]
     rt = r.get("realtime") or {}
     vals = [(h.get("value") or 0) for h in (r.get("hourly") or {}).get("precipitation") or []]
+    p2h = (r.get("minutely") or {}).get("precipitation_2h") or []
+    drift = int(max(0, time.time() - (data.get("server_time") or time.time())) // 60)
+    if any(v >= MIN_RAIN for v in p2h[drift:]):
+        return INTERVAL_NEAR
     local = ((rt.get("precipitation") or {}).get("local") or {}).get("intensity", 0) or 0
     sky = rt.get("skycon", "")
     if local >= MIN_RAIN or "RAIN" in sky or "SNOW" in sky or any(v >= HOURLY_RAIN for v in vals[:SOON_HOURS + 1]):
@@ -389,6 +408,7 @@ def main():
                               f"重新粘贴到 {TOKEN_FILE}")
         return
 
+    lock = take_lock()  # 拿不到就只显示，不联网、不写状态
     state = load_state()
     cached, age = load_cache()
     view = None
@@ -398,7 +418,7 @@ def main():
         except (KeyError, TypeError, ValueError):
             view = None
 
-    if fetch_due(view, age, state, take_force()):
+    if lock and fetch_due(view, age, state, take_force()):
         def count():
             if state["count"] >= YEAR_CAP:
                 return False
@@ -419,7 +439,8 @@ def main():
             save_cache(data)
             view, age = rebase(data, time.time()) or data, 0  # 缓存留 48 小时，显示裁到 24 小时
             state.update(fail_ts=0, err=None)
-    save_state(state)
+    if lock:
+        save_state(state)
 
     # 偶发失败不该让整个菜单栏变成错误卡片：拿最近一次成功的数据顶班，
     # 并在页脚说明离线原因；缓存太旧或压根没有才报错。

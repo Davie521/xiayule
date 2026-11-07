@@ -38,6 +38,7 @@ def load():
     m.CACHE_DIR = "/tmp"
     m.STATE_FILE = "/tmp/xy-test-state.json"
     m.FORCE_FILE = "/tmp/xy-test-force"
+    m.LOCK_FILE = "/tmp/xy-test-lock"
     m.real_fetch_due = m.fetch_due
     m.fetch_due = lambda *a: True  # 渲染类用例每轮都联网；策略看 H 段
     m.real_save_state = m.save_state
@@ -679,6 +680,44 @@ run(m6)
 check("H43 重试到上限就停", len(cnt) == 1, f"实际 {len(cnt)}")
 check("H44 计数不超上限", json.load(open(H_STATE))["count"] == m6.YEAR_CAP)
 
+# 另一轮正在跑：只显示，不联网、不动状态，刷新标记留给下一轮
+import fcntl  # noqa: E402
+os.remove(H_STATE)
+hits = []
+serve(m6, base())
+real_open = m6.urllib.request.urlopen
+m6.urllib.request.urlopen = lambda url, timeout=None: (hits.append(url), real_open(url, timeout))[1]
+other = open(m6.LOCK_FILE, "w")
+fcntl.flock(other, fcntl.LOCK_EX)
+open(m6.FORCE_FILE, "w").close()
+out = run(m6)
+check("H45 拿不到锁不联网", not hits, f"实际 {len(hits)}")
+check("H46 拿不到锁不写状态", not os.path.exists(H_STATE))
+check("H47 刷新标记留着", os.path.exists(m6.FORCE_FILE))
+check("H48 拿不到锁照常显示", any("徐泾" in l for l in out))
+other.close()
+run(m6)
+check("H49 放开后下一轮就联网", len(hits) == 1, f"实际 {len(hits)}")
+
+# 分钟级有雨也算临近；已经过去的分钟不算
+p = base()
+p["result"]["minutely"] = {"precipitation_2h": [0.0] * 25 + [1.0] * 95}
+check("H50 分钟级 25 分钟后有雨→30 分钟", m5.fetch_interval(p) == 30 * 60)
+p["result"]["minutely"] = {"precipitation_2h": [1.0] * 10 + [0.0] * 110}
+p["server_time"] = time.time() - 20 * 60
+check("H51 分钟级的雨已过去不算", m5.fetch_interval(p) == 6 * 3600)
+
+# 改了位置：旧地点的缓存不用
+blob = json.load(open(H_CACHE))
+check("H52 缓存记着位置", blob["loc"] == [m6.LON, m6.LAT])
+real_lon = m6.LON
+m6.LON = 100.0
+check("H53 换位置后缓存作废", m6.load_cache() == (None, None))
+m6.LON = real_lon
+blob.pop("loc")
+json.dump(blob, open(H_CACHE, "w"))
+check("H54 旧格式缓存照常读", m6.load_cache()[0] is not None)
+
 # 坏状态文件不挡菜单栏
 open(H_STATE, "w").write("{bad")
 serve(m6, base())
@@ -687,7 +726,7 @@ check("H40 状态文件坏了照常显示", any("徐泾" in l for l in out))
 
 print("=" * 62)
 for f in ("/tmp/xy-test-cache.json", "/tmp/xy-old-cache.json", "/tmp/xy-drift-cache.json",
-          "/tmp/xy-test-errors.log", H_CACHE, H_STATE, H_STATE + ".tmp", "/tmp/xy-test-force"):
+          "/tmp/xy-test-errors.log", H_CACHE, H_STATE, H_STATE + ".tmp", "/tmp/xy-test-force", "/tmp/xy-test-lock"):
     if os.path.exists(f):
         os.remove(f)
 total = PASSED + len(FAILURES)
