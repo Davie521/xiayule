@@ -36,6 +36,12 @@ def load():
     m.CACHE_FILE = "/tmp/xy-test-cache.json"
     m.ERR_LOG = "/tmp/xy-test-errors.log"
     m.CACHE_DIR = "/tmp"
+    m.STATE_FILE = "/tmp/xy-test-state.json"
+    m.FORCE_FILE = "/tmp/xy-test-force"
+    m.real_fetch_due = m.fetch_due
+    m.fetch_due = lambda *a: True  # 渲染类用例每轮都联网；策略看 H 段
+    m.real_save_state = m.save_state
+    m.save_state = lambda s: None
     return m
 
 
@@ -293,13 +299,13 @@ check("C4 离线横幅置顶", idx_banner == 2, f"位置 {idx_banner}")
 
 # C5 缓存过期 → 报错卡片
 blob = json.load(open(m.CACHE_FILE))
-blob["ts"] = time.time() - 3 * 3600
+blob["ts"] = time.time() - 25 * 3600
 json.dump(blob, open("/tmp/xy-old-cache.json", "w"))
 old_cache = m.CACHE_FILE
 m.CACHE_FILE = "/tmp/xy-old-cache.json"
 raise_http(m, 500)
 out = run(m)
-check("C5 缓存超 2h 报错", out[0].startswith(":exclamationmark.triangle.fill:"), out[0])
+check("C5 缓存超 24h 报错", out[0].startswith(":exclamationmark.triangle.fill:"), out[0])
 m.CACHE_FILE = old_cache
 
 # C6 无缓存 → 报错卡片
@@ -528,9 +534,160 @@ check("G4 测试不写字节码", sys.dont_write_bytecode is True)
 check("G5 插件目录无 __pycache__", not os.path.exists(os.path.join(PLUGIN_DIR, "__pycache__")))
 
 print()
+print()
+print("=" * 62)
+print("H. 省额度策略（什么时候才联网）")
+print("=" * 62)
+
+H_CACHE = "/tmp/xy-h-cache.json"
+H_STATE = "/tmp/xy-h-state.json"
+
+
+def fresh_state():
+    return {"start": time.time(), "count": 0, "fail_ts": 0, "err": None}
+
+
+def rain_at(i, n=24):
+    p = base()
+    vals = [0.0] * n
+    vals[i] = 1.0
+    p["result"]["hourly"]["precipitation"] = hourly(vals)
+    return p
+
+
+m5 = load()
+due = m5.real_fetch_due
+m5.user_active = lambda: True
+clear = base()
+check("H1 24 小时无雨→6 小时", m5.fetch_interval(clear) == 6 * 3600)
+check("H2 第 10 小时有雨→2 小时", m5.fetch_interval(rain_at(10)) == 2 * 3600)
+check("H3 第 3 小时有雨→30 分钟", m5.fetch_interval(rain_at(3)) == 30 * 60)
+check("H3b 第 4 小时有雨还不算临近", m5.fetch_interval(rain_at(4)) == 2 * 3600)
+p = base()
+p["result"]["realtime"]["skycon"] = "LIGHT_RAIN"
+check("H4 正在下→30 分钟", m5.fetch_interval(p) == 30 * 60)
+
+check("H5 晴天 5 小时不调", not due(clear, 5 * 3600, fresh_state(), False))
+check("H6 晴天 6 小时要调", due(clear, 6 * 3600, fresh_state(), False))
+check("H7 临近下雨 29 分钟不调", not due(rain_at(1), 29 * 60, fresh_state(), False))
+check("H8 临近下雨 30 分钟要调", due(rain_at(1), 30 * 60, fresh_state(), False))
+check("H9 没缓存要调", due(None, None, fresh_state(), False))
+
+m5.user_active = lambda: False
+check("H10 没在用不调，哪怕到点", not due(clear, 7 * 3600, fresh_state(), False))
+check("H11 没在用且没缓存也不调", not due(None, None, fresh_state(), False))
+check("H12 手动刷新不看是否在用", due(clear, 60, fresh_state(), True))
+m5.user_active = lambda: True
+
+st = fresh_state()
+st["fail_ts"] = time.time() - 60
+check("H13 刚失败不调", not due(clear, 7 * 3600, st, False))
+check("H14 手动刷新不等退避", due(clear, 7 * 3600, st, True))
+st["fail_ts"] = time.time() - 31 * 60
+check("H15 退避过了再调", due(clear, 7 * 3600, st, False))
+st = fresh_state()
+st["count"] = m5.YEAR_CAP
+check("H16 到上限不调", not due(clear, 7 * 3600, st, False))
+check("H17 到上限手动刷新也不调", not due(clear, 7 * 3600, st, True))
+
+# 空闲时间解析
+class Done:
+    stdout = '  | |   "HIDIdleTime" = 400000000000\n'
+m5.subprocess.run = lambda *a, **k: Done
+check("H18 解析空闲秒数", m5.idle_seconds() == 400)
+del m5.user_active
+m5 = load()
+m5.subprocess.run = lambda *a, **k: Done
+check("H19 空闲 400 秒算没在用", not m5.user_active())
+Done.stdout = ""
+check("H20 读不到空闲时间按在用算", m5.user_active())
+
+# 额度用完：只发一次请求，计入次数，下一轮不再调
+m6 = load()
+m6.CACHE_FILE, m6.STATE_FILE = H_CACHE, H_STATE
+m6.save_state = m6.real_save_state
+m6.fetch_due = m6.real_fetch_due
+m6.user_active = lambda: True
+for f in (H_CACHE, H_STATE):
+    if os.path.exists(f):
+        os.remove(f)
+cnt = []
+raise_http(m6, 429, b'{"error":"\'API quota is exhausted\'"}', cnt)
+out = run(m6)
+check("H21 额度用完不重试", len(cnt) == 1, f"实际 {len(cnt)}")
+check("H22 额度用完给买额度入口", any("href=https://platform.caiyunapp.com/" in l for l in out))
+check("H23 失败也计数", json.load(open(H_STATE))["count"] == 1)
+out = run(m6)
+check("H24 退避期内不再请求", len(cnt) == 1, f"实际 {len(cnt)}")
+check("H25 退避期内还显示错误", any("quota" in l for l in out))
+
+# 成功后第二轮直接用缓存，错误状态清掉
+os.remove(H_STATE)
+hits = []
+serve(m6, base())
+real_open = m6.urllib.request.urlopen
+m6.urllib.request.urlopen = lambda url, timeout=None: (hits.append(url), real_open(url, timeout))[1]
+out1 = run(m6)
+out2 = run(m6)
+check("H26 五分钟内第二轮不联网", len(hits) == 1, f"实际 {len(hits)}")
+check("H27 一次拿 48 小时", "hourlysteps=48" in hits[0])
+check("H28 两轮显示一致", [l for l in out1 if "更新于" not in l] == [l for l in out2 if "更新于" not in l])
+check("H29 页脚显示已用次数", any("本机已用 1/5000" in l for l in out2))
+open(m6.FORCE_FILE, "w").close()
+run(m6)
+check("H30 点刷新真的联网", len(hits) == 2)
+check("H31 刷新标记用完就清", not os.path.exists(m6.FORCE_FILE))
+check("H32 刷新项会留标记", any("bash=/usr/bin/touch" in l and "refresh=true" in l for l in out2))
+
+# 旧缓存对齐：3 小时前的数据，第 5 小时的雨现在是第 2 小时，气温换成预报
+p = rain_at(5, 48)
+p["result"]["hourly"]["temperature"] = [{"datetime": "x", "value": 20 + i} for i in range(48)]
+p["result"]["hourly"]["skycon"] = [{"datetime": "x", "value": "CLOUDY"} for _ in range(48)]
+p["server_time"] = time.time() - 3 * 3600
+v = m6.rebase(p, p["server_time"])
+hv = [h["value"] for h in v["result"]["hourly"]["precipitation"]]
+check("H33 过去的小时被丢掉", hv.index(1.0) == 2, str(hv[:6]))
+check("H34 只留 24 小时", len(hv) == 24)
+check("H35 实况换成当前小时预报", v["result"]["realtime"]["temperature"] == 23)
+check("H36 过期的一句话预报不显示", v["result"]["forecast_keypoint"] == "")
+check("H37 不改原数据", len(p["result"]["hourly"]["precipitation"]) == 48)
+p = base()
+p["server_time"] = time.time() - 3 * 86400
+check("H38 预报用完返回 None", m6.rebase(p, p["server_time"]) is None)
+p = rain_at(30, 48)
+p["server_time"] = time.time() - 86400
+v = m6.rebase(p, p["server_time"])
+check("H39 过了一天，每日预报往前挪", len(v["result"]["daily"]["temperature"]) == 2)
+
+# 刚拿到的数据也只显示 24 小时，缓存里留足 48 小时
+os.remove(H_STATE)
+p = rain_at(36, 48)
+p["result"]["hourly"]["temperature"] = [{"datetime": "x", "value": 20} for _ in range(48)]
+p["result"]["hourly"]["skycon"] = [{"datetime": "x", "value": "CLOUDY"} for _ in range(48)]
+serve(m6, p)
+open(m6.FORCE_FILE, "w").close()
+out = run(m6)
+check("H41 新数据不显示 24 小时外的雨", not any("24小时降水" in l for l in out), str([l for l in out if "降水" in l]))
+check("H42 缓存仍是 48 小时", len(json.load(open(H_CACHE))["data"]["result"]["hourly"]["precipitation"]) == 48)
+
+# 重试也不能超上限
+json.dump({"start": time.time(), "count": m6.YEAR_CAP - 1, "fail_ts": 0, "err": None}, open(H_STATE, "w"))
+cnt = []
+raise_http(m6, 500, counter=cnt)
+open(m6.FORCE_FILE, "w").close()
+run(m6)
+check("H43 重试到上限就停", len(cnt) == 1, f"实际 {len(cnt)}")
+check("H44 计数不超上限", json.load(open(H_STATE))["count"] == m6.YEAR_CAP)
+
+# 坏状态文件不挡菜单栏
+open(H_STATE, "w").write("{bad")
+serve(m6, base())
+out = run(m6)
+check("H40 状态文件坏了照常显示", any("徐泾" in l for l in out))
+
 print("=" * 62)
 for f in ("/tmp/xy-test-cache.json", "/tmp/xy-old-cache.json", "/tmp/xy-drift-cache.json",
-          "/tmp/xy-test-errors.log"):
+          "/tmp/xy-test-errors.log", H_CACHE, H_STATE, H_STATE + ".tmp", "/tmp/xy-test-force"):
     if os.path.exists(f):
         os.remove(f)
 total = PASSED + len(FAILURES)

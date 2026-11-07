@@ -38,7 +38,14 @@ cd xiayule && ./install.sh
 | `VAR_PLACE` | 下拉菜单里显示的地名 |
 | `VAR_CAIYUN_TOKEN` | 填了就用它，留空则读 `~/.config/caiyun/token` |
 
-刷新频率写在文件名里：`xiayule.5m.py` 是 5 分钟一次，288 次/天。嫌费额度就改名成 `.15m.py`。
+`xiayule.5m.py` 里的 5 分钟只是重画菜单栏的频率，不等于调用频率。彩云的免费额度是一次性的 1 万次，所以插件自己决定什么时候联网：
+
+- 最近 5 分钟没动键盘鼠标就不调。
+- 未来 24 小时没雨，6 小时调一次；24 小时内有雨，2 小时一次；3 小时内有雨或正在下，30 分钟一次。
+- 两次调用之间用缓存的 48 小时预报，气温和时段按当前时间对齐。
+- 每台机器 365 天最多 5000 次，到了就停。用量写在下拉菜单页脚和 `~/.cache/xiayule/state.json`。
+
+菜单里点「刷新」会立刻调一次。
 
 ## 免费版拿不到分钟级
 
@@ -50,7 +57,7 @@ cd xiayule && ./install.sh
 
 网络抖动、彩云偶发 5xx、免费版的 QPS 限流，都不会让菜单栏变成错误卡片。插件会退避重试，还不行就拿上一次成功的数据顶班，并在下拉菜单顶部标明这是几分钟前的。失败记录留在 `~/.cache/xiayule/errors.log`。
 
-跑测试：`python3 test_plugin.py`，65 项，纯 mock 不打真实 API。CI（`.github/workflows/ci.yml`）在 Python 3.9 和 3.14 上各跑一遍——3.9 是 macOS 自带的那个 `/usr/bin/python3`，插件 shebang 写的是 `env python3`，而 SwiftBar 给插件的 PATH 未必包含 homebrew，所以下限得真跑过才算数。
+跑测试：`python3 test_plugin.py`，110 项，纯 mock 不打真实 API。CI（`.github/workflows/ci.yml`）在 Python 3.9 和 3.14 上各跑一遍——3.9 是 macOS 自带的那个 `/usr/bin/python3`，插件 shebang 写的是 `env python3`，而 SwiftBar 给插件的 PATH 未必包含 homebrew，所以下限得真跑过才算数。
 
 剩下的细节——SwiftBar 的插件扫描规则、菜单栏那个方框问号到底是什么、彩云 API 的雨强分档、调试命令——都在 [docs/notes.md](docs/notes.md)。
 
