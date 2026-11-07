@@ -659,6 +659,26 @@ p["server_time"] = time.time() - 86400
 v = m6.rebase(p, p["server_time"])
 check("H39 过了一天，每日预报往前挪", len(v["result"]["daily"]["temperature"]) == 2)
 
+# 刚拿到的数据也只显示 24 小时，缓存里留足 48 小时
+os.remove(H_STATE)
+p = rain_at(36, 48)
+p["result"]["hourly"]["temperature"] = [{"datetime": "x", "value": 20} for _ in range(48)]
+p["result"]["hourly"]["skycon"] = [{"datetime": "x", "value": "CLOUDY"} for _ in range(48)]
+serve(m6, p)
+open(m6.FORCE_FILE, "w").close()
+out = run(m6)
+check("H41 新数据不显示 24 小时外的雨", not any("24小时降水" in l for l in out), str([l for l in out if "降水" in l]))
+check("H42 缓存仍是 48 小时", len(json.load(open(H_CACHE))["data"]["result"]["hourly"]["precipitation"]) == 48)
+
+# 重试也不能超上限
+json.dump({"start": time.time(), "count": m6.YEAR_CAP - 1, "fail_ts": 0, "err": None}, open(H_STATE, "w"))
+cnt = []
+raise_http(m6, 500, counter=cnt)
+open(m6.FORCE_FILE, "w").close()
+run(m6)
+check("H43 重试到上限就停", len(cnt) == 1, f"实际 {len(cnt)}")
+check("H44 计数不超上限", json.load(open(H_STATE))["count"] == m6.YEAR_CAP)
+
 # 坏状态文件不挡菜单栏
 open(H_STATE, "w").write("{bad")
 serve(m6, base())

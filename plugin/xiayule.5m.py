@@ -345,8 +345,8 @@ def fetch(url, token, on_attempt=None):
     for delay in RETRY_DELAYS:
         if delay:
             time.sleep(delay)
-        if on_attempt:
-            on_attempt()
+        if on_attempt and not on_attempt():
+            break  # 上限到了，重试也不发
         try:
             with urllib.request.urlopen(url, timeout=15) as resp:
                 return json.load(resp), None, None
@@ -400,7 +400,10 @@ def main():
 
     if fetch_due(view, age, state, take_force()):
         def count():
+            if state["count"] >= YEAR_CAP:
+                return False
             state["count"] += 1
+            return True
         url = (f"https://api.caiyunapp.com/v2.6/{token}/{LON},{LAT}/weather"
                f"?alert=true&dailysteps=3&hourlysteps=48&unit=metric:v2")
         data, err_title, err_detail = fetch(url, token, count)
@@ -414,7 +417,7 @@ def main():
             state.update(fail_ts=time.time(), err=[err_title, err_detail])
         else:
             save_cache(data)
-            view, age = data, 0
+            view, age = rebase(data, time.time()) or data, 0  # 缓存留 48 小时，显示裁到 24 小时
             state.update(fail_ts=0, err=None)
     save_state(state)
 
